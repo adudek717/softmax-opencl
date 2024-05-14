@@ -6,6 +6,7 @@
 #include <iostream>
 #include <array>
 #include <numeric>
+#include <random>
 
 void printIfError(cl_int errorCode) {
 	if (errorCode != CL_SUCCESS) {
@@ -39,63 +40,54 @@ cl::Program CreateProgram(const std::string& file)
 	return program;
 }
 
-int main()
-{
-	auto programReduceMax = CreateProgram("reducemax.cl");
-	//auto programSubtractMax = CreateProgram("subtractmax.cl");
-	auto context = programReduceMax.getInfo<CL_PROGRAM_CONTEXT>();
-	auto devices = context.getInfo<CL_CONTEXT_DEVICES>();
-	auto& device = devices.front();
 
-	// Prepare some example input
-	const int numX = 8;
-	const int numY = 8;
-	const int numZ = 8;
-	const int count = numX * numY * numZ;
-	//std::array<std::array<std::array<float, numZ>, numY>, numX> inputArr;
+std::vector<float> generateInputData(size_t size, float minValue, float maxValue) {
+	std::vector<float> data(size);
+	std::random_device rd;
+	std::mt19937 gen(rd());
+	std::uniform_real_distribution<> dis(minValue, maxValue);
+	for (size_t i = 0; i < size; ++i) {
+		data.at(i) = dis(gen);
+	}
+	return data;
+}
 
-	int num = 0;
-	//for (int i = 0; i < numX; ++i) {
-	//	for (int j = 0; j < numY; ++j) {
-	//		for (int k = 0; k < numZ; ++k) {
-	//			inputArr.at(i).at(j).at(k) = static_cast<float>(num++);
-	//		}
-	//	}
-	//}
-	std::vector<float> inputVec(count);
-	for (int i = 0; i < count; ++i) {
+std::vector<float> generateFixedInputData(size_t size) {
+	std::vector<float> data(size);
+	for (size_t i = 0; i < size; ++i) {
 		if (i % 2 == 0) {
-			inputVec.at(i) = static_cast<float>(1.5f);
+			data.at(i) = static_cast<float>(1.5f);
 		}
 		else {
-			inputVec.at(i) = static_cast<float>(3.4f);
+			data.at(i) = static_cast<float>(3.4f);
 		}
-
 	}
+	return data;
+}
 
+std::vector<float> softmax(cl::Program program, cl::Context context, cl::Device& device, const int INPUT_SIZE, std::vector<float>& inputData) {
 	// ---- Reduce Max ----
+	cl::Kernel reduceMax(program, "reducemax");
 
-	cl::Kernel kernel(programReduceMax, "reducemax");
+	cl_int getWorkGroupErrorCode = 0;
+	auto workGroupSize = reduceMax.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device, &getWorkGroupErrorCode);
+	printIfError(getWorkGroupErrorCode);
 
-	cl_int err1 = 0;
-	auto workGroupSize = kernel.getWorkGroupInfo<CL_KERNEL_WORK_GROUP_SIZE>(device, &err1);
-	printIfError(err1);
+	auto numWorkGroups = INPUT_SIZE / workGroupSize;
 
-	auto numWorkGroups = count / workGroupSize;
+	cl::Buffer buf(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * INPUT_SIZE, inputData.data());
+	cl::Buffer outbuf(context, CL_MEM_WRITE_ONLY | CL_MEM_HOST_READ_ONLY, sizeof(float) * INPUT_SIZE);
 
-	cl::Buffer buf(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * count, inputVec.data());
-	cl::Buffer outbuf(context, CL_MEM_WRITE_ONLY | CL_MEM_HOST_READ_ONLY, sizeof(float) * count);
-
-	kernel.setArg(0, buf);
-	kernel.setArg(1, sizeof(float) * workGroupSize, nullptr);
-	kernel.setArg(2, outbuf);
+	reduceMax.setArg(0, buf);
+	reduceMax.setArg(1, sizeof(float) * workGroupSize, nullptr);
+	reduceMax.setArg(2, outbuf);
 
 	std::vector<float> outVec(numWorkGroups);
 
 	cl::CommandQueue queue(context, device);
-	auto err2 = queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(count), cl::NDRange(workGroupSize));
+	auto err2 = queue.enqueueNDRangeKernel(reduceMax, cl::NullRange, cl::NDRange(INPUT_SIZE), cl::NDRange(workGroupSize));
 	printIfError(err2);
-	auto err3 = queue.enqueueReadBuffer(outbuf, CL_TRUE, 0, sizeof(float) * count, outVec.data());
+	auto err3 = queue.enqueueReadBuffer(outbuf, CL_TRUE, 0, sizeof(float) * INPUT_SIZE, outVec.data());
 	printIfError(err3);
 	queue.finish();
 
@@ -110,17 +102,17 @@ int main()
 
 	// ---- Subtract Max ----
 
-	cl::Kernel subtractMaxKernel(programReduceMax, "subtractmax");
-	cl::Buffer subtractMaxInputBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * count, inputVec.data());
-	cl::Buffer subtractMaxOutputBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * count);
+	cl::Kernel subtractMaxKernel(program, "subtractmax");
+	cl::Buffer subtractMaxInputBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * INPUT_SIZE, inputData.data());
+	cl::Buffer subtractMaxOutputBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * INPUT_SIZE);
 	subtractMaxKernel.setArg(0, subtractMaxInputBuffer);
 	subtractMaxKernel.setArg(1, subtractMaxOutputBuffer);
 	subtractMaxKernel.setArg(2, max);
 
-	std::vector<float> outputSubtractedMax(count);
-	auto err4 = queue.enqueueNDRangeKernel(subtractMaxKernel, cl::NullRange, cl::NDRange(count), cl::NDRange(workGroupSize));
+	std::vector<float> outputSubtractedMax(INPUT_SIZE);
+	auto err4 = queue.enqueueNDRangeKernel(subtractMaxKernel, cl::NullRange, cl::NDRange(INPUT_SIZE), cl::NDRange(workGroupSize));
 	printIfError(err4);
-	auto err5 = queue.enqueueReadBuffer(subtractMaxOutputBuffer, CL_TRUE, 0, sizeof(float) * count, outputSubtractedMax.data());
+	auto err5 = queue.enqueueReadBuffer(subtractMaxOutputBuffer, CL_TRUE, 0, sizeof(float) * INPUT_SIZE, outputSubtractedMax.data());
 	printIfError(err5);
 	queue.finish();
 
@@ -128,9 +120,9 @@ int main()
 
 	// ---- Reduce Sum ----
 
-	cl::Kernel reduceSumKernel(programReduceMax, "reducesum");
-	cl::Buffer reduceSumInputBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * count, outputSubtractedMax.data());
-	cl::Buffer reduceSumOutputBuffer(context, CL_MEM_WRITE_ONLY | CL_MEM_HOST_READ_ONLY, sizeof(float) * count);
+	cl::Kernel reduceSumKernel(program, "reducesum");
+	cl::Buffer reduceSumInputBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * INPUT_SIZE, outputSubtractedMax.data());
+	cl::Buffer reduceSumOutputBuffer(context, CL_MEM_WRITE_ONLY | CL_MEM_HOST_READ_ONLY, sizeof(float) * INPUT_SIZE);
 
 	reduceSumKernel.setArg(0, reduceSumInputBuffer);
 	reduceSumKernel.setArg(1, sizeof(float) * workGroupSize, nullptr);
@@ -138,9 +130,9 @@ int main()
 
 	std::vector<float> reduceSumOut(numWorkGroups);
 
-	auto err6 = queue.enqueueNDRangeKernel(reduceSumKernel, cl::NullRange, cl::NDRange(count), cl::NDRange(workGroupSize));
+	auto err6 = queue.enqueueNDRangeKernel(reduceSumKernel, cl::NullRange, cl::NDRange(INPUT_SIZE), cl::NDRange(workGroupSize));
 	printIfError(err2);
-	auto err7 = queue.enqueueReadBuffer(reduceSumOutputBuffer, CL_TRUE, 0, sizeof(float) * count, reduceSumOut.data());
+	auto err7 = queue.enqueueReadBuffer(reduceSumOutputBuffer, CL_TRUE, 0, sizeof(float) * INPUT_SIZE, reduceSumOut.data());
 	printIfError(err3);
 	queue.finish();
 
@@ -155,17 +147,17 @@ int main()
 
 	// ---- Divide Exponentials by Sum ----
 
-	cl::Kernel divideExpBySumKernel(programReduceMax, "divideexpbysum");
-	cl::Buffer divideExpBySumInputBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * count, outputSubtractedMax.data());
-	cl::Buffer divideExpBySumOutputBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * count);
+	cl::Kernel divideExpBySumKernel(program, "divideexpbysum");
+	cl::Buffer divideExpBySumInputBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * INPUT_SIZE, outputSubtractedMax.data());
+	cl::Buffer divideExpBySumOutputBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * INPUT_SIZE);
 	divideExpBySumKernel.setArg(0, divideExpBySumInputBuffer);
 	divideExpBySumKernel.setArg(1, divideExpBySumOutputBuffer);
 	divideExpBySumKernel.setArg(2, sum);
 
-	std::vector<float> outputDivideExpBySum(count);
-	auto err8 = queue.enqueueNDRangeKernel(divideExpBySumKernel, cl::NullRange, cl::NDRange(count), cl::NDRange(workGroupSize));
+	std::vector<float> outputDivideExpBySum(INPUT_SIZE);
+	auto err8 = queue.enqueueNDRangeKernel(divideExpBySumKernel, cl::NullRange, cl::NDRange(INPUT_SIZE), cl::NDRange(workGroupSize));
 	printIfError(err4);
-	auto err9 = queue.enqueueReadBuffer(divideExpBySumOutputBuffer, CL_TRUE, 0, sizeof(float) * count, outputDivideExpBySum.data());
+	auto err9 = queue.enqueueReadBuffer(divideExpBySumOutputBuffer, CL_TRUE, 0, sizeof(float) * INPUT_SIZE, outputDivideExpBySum.data());
 	printIfError(err5);
 	queue.finish();
 
@@ -175,6 +167,25 @@ int main()
 	std::vector<float> resultSoftmaxCopy(outputDivideExpBySum);
 	auto resultSoftmax = std::accumulate(resultSoftmaxCopy.begin(), resultSoftmaxCopy.end(), 1);
 	std::cout << resultSoftmax << std::endl;
+	
+	return resultSoftmaxCopy;
+}
+
+int main()
+{
+	auto program = CreateProgram("kernels.cl");
+	auto context = program.getInfo<CL_PROGRAM_CONTEXT>();
+	auto devices = context.getInfo<CL_CONTEXT_DEVICES>();
+	auto& device = devices.front();
+
+	const int INPUT_SIZE = 512;
+
+	// Generate random or fixed input data
+	std::vector<float> inputData = generateFixedInputData(INPUT_SIZE); // Alternative: std::vector<float> inputData = generateInputData(INPUT_SIZE, -5.0f, 5.0f);
+	std::vector<float> outputData = softmax(program, context, device, INPUT_SIZE, inputData);
+
+
+	
 
 	//std::cin.get();
 
